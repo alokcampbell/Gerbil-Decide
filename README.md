@@ -16,4 +16,4 @@ cd gerbil-decide
 cargo build --release
 ```
 
-3. Then go into your target folder, and the executable will be there!
+3. Then go into your target folder, then your release folder, and the executable will be there!
