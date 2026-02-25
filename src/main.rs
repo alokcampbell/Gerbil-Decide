@@ -75,8 +75,8 @@ struct Wheel {
 // wheel items and data
 
 impl Wheel {
-    fn new(name: String) -> Self {
-        let items = vec![
+    fn new(wheel_name: String) -> Self {
+        let starting_items = vec![
             Item::new("gerbil".to_string()),
             Item::new("buxley boys".to_string()),
             Item::new("gerbilamania".to_string()),
@@ -84,51 +84,77 @@ impl Wheel {
             Item::new("how to use eframe".to_string()),
             Item::new("morpen time".to_string()),
         ];
-        let pct_bufs = vec![String::new(); items.len()];
+        let number_of_items = starting_items.len();
+        let mut empty_pct_bufs = Vec::new();
+        for _ in 0..number_of_items {
+            empty_pct_bufs.push(String::new());
+        }
         Self {
             data: WheelData {
-                name,
-                items,
+                name: wheel_name,
+                items: starting_items,
                 removed_items: Vec::new(),
                 winner_history: Vec::new(),
                 remove_winner: false,
                 auto_spin: false,
             },
-            state: WheelState { pct_bufs, ..Default::default() },
+            state: WheelState { pct_bufs: empty_pct_bufs, ..Default::default() },
         }
     }
 
-    fn from_data(data: WheelData) -> Self {
-        let pct_bufs = vec![String::new(); data.items.len()];
+    fn from_data(wheel_data: WheelData) -> Self {
+        let number_of_items = wheel_data.items.len();
+        let mut empty_pct_bufs = Vec::new();
+        for _ in 0..number_of_items {
+            empty_pct_bufs.push(String::new());
+        }
         Self {
-            state: WheelState { pct_bufs, ..Default::default() },
-            data,
+            state: WheelState { pct_bufs: empty_pct_bufs, ..Default::default() },
+            data: wheel_data,
         }
     }
 
     fn total_weight(&self) -> u32 {
-        self.data.items.iter().map(|i| i.weight).sum::<u32>().max(1)
+        let mut total = 0;
+        for item in &self.data.items {
+            total += item.weight;
+        }
+        if total == 0 {
+            return 1;
+        }
+        total
     }
 
     fn sync_pct_bufs(&mut self) {
-        let n = self.data.items.len();
-        self.state.pct_bufs.resize(n, String::new());
+        let number_of_items = self.data.items.len();
+        self.state.pct_bufs.resize(number_of_items, String::new());
     }
 
-    fn apply_pct_input(&mut self, idx: usize) -> bool {
-        let s = self.state.pct_bufs[idx].trim().trim_end_matches('%').to_string();
-        let Ok(pct) = s.parse::<f32>() else { return false };
+    fn apply_pct_input(&mut self, item_index: usize) -> bool {
+        let raw_input = self.state.pct_bufs[item_index].trim().trim_end_matches('%').to_string();
+        let parsed = raw_input.parse::<f32>();
+        let pct = match parsed {
+            Ok(value) => value,
+            Err(_) => return false,
+        };
 
-        let n = self.data.items.len() as f32;
-        let clamped = pct.clamp(1.0, (100.0 - (n - 1.0)).max(1.0));
+        let number_of_items = self.data.items.len() as f32;
+        let min_pct = 1.0_f32;
+        let max_pct = (100.0 - (number_of_items - 1.0)).max(1.0);
+        let clamped_pct = pct.clamp(min_pct, max_pct);
 
-        let others_weight = self.data.items.iter().enumerate()
-            .filter(|(i, _)| *i != idx)
-            .map(|(_, it)| it.weight)
-            .sum::<u32>()
-            .max(1);
+        let mut others_total_weight = 0_u32;
+        for (index, item) in self.data.items.iter().enumerate() {
+            if index != item_index {
+                others_total_weight += item.weight;
+            }
+        }
+        if others_total_weight == 0 {
+            others_total_weight = 1;
+        }
 
-        self.data.items[idx].weight = (((clamped / (100.0 - clamped)) * others_weight as f32).round() as u32).max(1);
+        let new_weight = ((clamped_pct / (100.0 - clamped_pct)) * others_total_weight as f32).round() as u32;
+        self.data.items[item_index].weight = new_weight.max(1);
         true
     }
 
@@ -157,12 +183,13 @@ impl Wheel {
             if self.state.stop_delay >= 1.0 {
                 self.state.is_spinning = false;
                 if !self.data.items.is_empty() {
-                    let idx = self.get_winner();
-                    let winner = self.data.items[idx].name.clone();
-                    self.data.winner_history.insert(0, winner);
+                    let winning_index = self.get_winner();
+                    let winning_name = self.data.items[winning_index].name.clone();
+                    self.data.winner_history.insert(0, winning_name);
                     if self.data.remove_winner {
-                        self.data.removed_items.push(self.data.items.remove(idx));
-                        self.state.pct_bufs.remove(idx);
+                        let removed_item = self.data.items.remove(winning_index);
+                        self.data.removed_items.push(removed_item);
+                        self.state.pct_bufs.remove(winning_index);
                     }
                     if self.data.auto_spin && self.data.remove_winner && self.data.items.len() > 1 {
                         self.spin();
@@ -174,18 +201,19 @@ impl Wheel {
 
         false
     }
+
     fn get_winner(&self) -> usize {
         if self.data.items.is_empty() {
             return 0;
         }
-        let total = self.total_weight() as f32;
-        let normalized = ((-PI / 2.0 + self.state.rotation) % (2.0 * PI) + 2.0 * PI) % (2.0 * PI);
-        let fraction = normalized / (2.0 * PI);
-        let mut cumulative = 0.0_f32;
-        for (i, item) in self.data.items.iter().enumerate() {
-            cumulative += item.weight as f32 / total;
-            if fraction < cumulative {
-                return i;
+        let total_weight = self.total_weight() as f32;
+        let normalized_angle = ((-PI / 2.0 + self.state.rotation) % (2.0 * PI) + 2.0 * PI) % (2.0 * PI);
+        let fraction_of_circle = normalized_angle / (2.0 * PI);
+        let mut cumulative_fraction = 0.0_f32;
+        for (index, item) in self.data.items.iter().enumerate() {
+            cumulative_fraction += item.weight as f32 / total_weight;
+            if fraction_of_circle < cumulative_fraction {
+                return index;
             }
         }
         self.data.items.len() - 1
@@ -210,13 +238,14 @@ struct WheelApp {
 // save / load data here
 impl WheelApp {
     fn load() -> Self {
-        let path = Self::save_path();
-        if let Ok(data) = fs::read_to_string(&path) {
-            if let Ok(save) = serde_json::from_str::<SaveData>(&data) {
-                let current = save.current.min(save.wheels.len().saturating_sub(1));
+        let save_file_path = Self::save_path();
+        if let Ok(file_contents) = fs::read_to_string(&save_file_path) {
+            if let Ok(save_data) = serde_json::from_str::<SaveData>(&file_contents) {
+                let current_wheel_index = save_data.current.min(save_data.wheels.len().saturating_sub(1));
+                let loaded_wheels: Vec<Wheel> = save_data.wheels.into_iter().map(Wheel::from_data).collect();
                 return Self {
-                    wheels: save.wheels.into_iter().map(Wheel::from_data).collect(),
-                    current,
+                    wheels: loaded_wheels,
+                    current: current_wheel_index,
                     show_history: false,
                     show_removed: false,
                     last_time: std::time::Instant::now(),
@@ -235,16 +264,20 @@ impl WheelApp {
     }
 
     fn save_data(&self) {
-        let data = SaveData {
-            wheels: self.wheels.iter().map(|w| w.data.clone()).collect(),
+        let mut all_wheel_data = Vec::new();
+        for wheel in &self.wheels {
+            all_wheel_data.push(wheel.data.clone());
+        }
+        let save_data = SaveData {
+            wheels: all_wheel_data,
             current: self.current,
         };
-        if let Ok(json) = serde_json::to_string_pretty(&data) {
-            let path = Self::save_path();
-            if let Some(parent) = path.parent() {
-                let _ = fs::create_dir_all(parent);
+        if let Ok(json_string) = serde_json::to_string_pretty(&save_data) {
+            let save_file_path = Self::save_path();
+            if let Some(parent_folder) = save_file_path.parent() {
+                let _ = fs::create_dir_all(parent_folder);
             }
-            let _ = fs::write(path, json);
+            let _ = fs::write(save_file_path, json_string);
         }
     }
 
@@ -255,14 +288,16 @@ impl WheelApp {
         path
     }
 }
+
 // eframe lol, this is where all of the actual UI is
 impl eframe::App for WheelApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let now = std::time::Instant::now();
-        let dt = now.duration_since(self.last_time).as_secs_f32();
-        self.last_time = now;
+        let current_time = std::time::Instant::now();
+        let dt = current_time.duration_since(self.last_time).as_secs_f32();
+        self.last_time = current_time;
 
-        if self.wheels[self.current].tick(dt) {
+        let spin_just_finished = self.wheels[self.current].tick(dt);
+        if spin_just_finished {
             self.needs_save = true;
         }
         if self.wheels[self.current].state.is_spinning {
@@ -274,21 +309,22 @@ impl eframe::App for WheelApp {
                 ui.heading("Gerbil Decide");
                 ui.separator();
 
-                let mut switch = None;
-                for (i, w) in self.wheels.iter().enumerate() {
-                    if ui.selectable_label(self.current == i, &w.data.name).clicked() {
-                        switch = Some(i);
+                let mut switch_to_wheel = None;
+                for (wheel_index, wheel) in self.wheels.iter().enumerate() {
+                    let is_selected = self.current == wheel_index;
+                    if ui.selectable_label(is_selected, &wheel.data.name).clicked() {
+                        switch_to_wheel = Some(wheel_index);
                     }
                 }
-                if let Some(i) = switch {
-                    self.current = i;
+                if let Some(wheel_index) = switch_to_wheel {
+                    self.current = wheel_index;
                 }
 
                 ui.separator();
 
                 if ui.button("➕ New Wheel").clicked() {
-                    let name = format!("Wheel {}", self.wheels.len() + 1);
-                    self.wheels.push(Wheel::new(name));
+                    let new_wheel_name = format!("Wheel {}", self.wheels.len() + 1);
+                    self.wheels.push(Wheel::new(new_wheel_name));
                     self.current = self.wheels.len() - 1;
                     self.needs_save = true;
                 }
@@ -302,17 +338,17 @@ impl eframe::App for WheelApp {
             });
         });
 
-        let mut changed = false;
+        let mut something_changed = false;
 
         egui::SidePanel::left("panel").min_width(260.0).max_width(370.0).show(ctx, |ui| {
-            let w = &mut self.wheels[self.current];
-            w.sync_pct_bufs();
+            let current_wheel = &mut self.wheels[self.current];
+            current_wheel.sync_pct_bufs();
 
             ui.add_space(5.0);
             ui.horizontal(|ui| {
                 ui.label("Wheel Name:");
-                if ui.text_edit_singleline(&mut w.data.name).changed() {
-                    changed = true;
+                if ui.text_edit_singleline(&mut current_wheel.data.name).changed() {
+                    something_changed = true;
                 }
             });
 
@@ -322,170 +358,195 @@ impl eframe::App for WheelApp {
 
             ui.heading("Add Items");
             ui.horizontal(|ui| {
-                let resp = ui.text_edit_singleline(&mut w.state.input_text);
-                let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if (enter || ui.button("Add").clicked()) && !w.state.input_text.trim().is_empty() {
-                    let avg_weight = if w.data.items.is_empty() {
+                let text_box_response = ui.text_edit_singleline(&mut current_wheel.state.input_text);
+                let pressed_enter = text_box_response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let clicked_add = ui.button("Add").clicked();
+                let has_text = !current_wheel.state.input_text.trim().is_empty();
+
+                if (pressed_enter || clicked_add) && has_text {
+                    let avg_weight = if current_wheel.data.items.is_empty() {
                         1
                     } else {
-                        (w.total_weight() / w.data.items.len() as u32).max(1)
+                        (current_wheel.total_weight() / current_wheel.data.items.len() as u32).max(1)
                     };
-                    let mut new_item = Item::new(w.state.input_text.trim().to_string());
+                    let new_item_name = current_wheel.state.input_text.trim().to_string();
+                    let mut new_item = Item::new(new_item_name);
                     new_item.weight = avg_weight;
-                    w.data.items.push(new_item);
-                    w.state.pct_bufs.iter_mut().for_each(|b| b.clear());
-                    w.state.pct_bufs.push(String::new());
-                    w.state.input_text.clear();
-                    changed = true;
+                    current_wheel.data.items.push(new_item);
+                    for buf in current_wheel.state.pct_bufs.iter_mut() {
+                        buf.clear();
+                    }
+                    current_wheel.state.pct_bufs.push(String::new());
+                    current_wheel.state.input_text.clear();
+                    something_changed = true;
                 }
             });
 
             ui.add_space(10.0);
-            ui.heading(format!("Items ({})", w.data.items.len()));
+            ui.heading(format!("Items ({})", current_wheel.data.items.len()));
 
             egui::ScrollArea::vertical().max_height(250.0).show(ui, |ui| {
                 let mut remove_temp: Option<usize> = None;
                 let mut remove_perm: Option<usize> = None;
-                let mut commit_edit = false;
-                let mut apply_pct: Option<usize> = None;
-                let total = w.total_weight();
+                let mut should_commit_edit = false;
+                let mut apply_pct_for_index: Option<usize> = None;
+                let total_weight = current_wheel.total_weight();
 
-                for i in 0..w.data.items.len() {
-                    let pct = w.data.items[i].weight as f32 / total as f32 * 100.0;
+                for item_index in 0..current_wheel.data.items.len() {
+                    let item_pct = current_wheel.data.items[item_index].weight as f32 / total_weight as f32 * 100.0;
 
-                    if w.state.pct_bufs[i].is_empty() {
-                        w.state.pct_bufs[i] = format!("{:.0}", pct.round());
+                    if current_wheel.state.pct_bufs[item_index].is_empty() {
+                        current_wheel.state.pct_bufs[item_index] = format!("{:.0}", item_pct.round());
                     }
 
                     ui.horizontal(|ui| {
-                        if w.state.editing_idx == Some(i) {
-                            let resp = ui.add(
-                                egui::TextEdit::singleline(&mut w.state.edit_buf).desired_width(80.0)
+                        let currently_editing_this_item = current_wheel.state.editing_idx == Some(item_index);
+                        if currently_editing_this_item {
+                            let edit_response = ui.add(
+                                egui::TextEdit::singleline(&mut current_wheel.state.edit_buf).desired_width(80.0)
                             );
-                            if resp.lost_focus() || ui.input(|inp| inp.key_pressed(egui::Key::Enter)) {
-                                commit_edit = true;
+                            let pressed_enter = ui.input(|inp| inp.key_pressed(egui::Key::Enter));
+                            if edit_response.lost_focus() || pressed_enter {
+                                should_commit_edit = true;
                             }
-                            resp.request_focus();
+                            edit_response.request_focus();
                         } else {
-                            let label = ui.add(
-                                egui::Label::new(&w.data.items[i].name).sense(egui::Sense::click())
+                            let item_label = ui.add(
+                                egui::Label::new(&current_wheel.data.items[item_index].name).sense(egui::Sense::click())
                             );
-                            if label.double_clicked() {
-                                w.state.editing_idx = Some(i);
-                                w.state.edit_buf = w.data.items[i].name.clone();
+                            if item_label.double_clicked() {
+                                current_wheel.state.editing_idx = Some(item_index);
+                                current_wheel.state.edit_buf = current_wheel.data.items[item_index].name.clone();
                             }
-                            label.on_hover_text("Double-click to rename");
+                            item_label.on_hover_text("Double-click to rename");
                         }
 
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.small_button("🗑").on_hover_text("Delete forever").clicked() {
-                                remove_perm = Some(i);
+                                remove_perm = Some(item_index);
                             }
                             if ui.small_button("❌").on_hover_text("Remove temporarily").clicked() {
-                                remove_temp = Some(i);
+                                remove_temp = Some(item_index);
                             }
 
                             ui.label("%");
 
-                            let pct_resp = ui.add(
-                                egui::TextEdit::singleline(&mut w.state.pct_bufs[i])
+                            let pct_box_response = ui.add(
+                                egui::TextEdit::singleline(&mut current_wheel.state.pct_bufs[item_index])
                                     .desired_width(36.0)
                                     .horizontal_align(egui::Align::RIGHT)
                             );
-                            if pct_resp.lost_focus() || ui.input(|inp| inp.key_pressed(egui::Key::Enter)) {
-                                apply_pct = Some(i);
+                            let pressed_enter = ui.input(|inp| inp.key_pressed(egui::Key::Enter));
+                            if pct_box_response.lost_focus() || pressed_enter {
+                                apply_pct_for_index = Some(item_index);
                             }
-                            if pct_resp.gained_focus() {
-                                w.state.pct_bufs[i] = format!("{:.0}", pct.round());
+                            if pct_box_response.gained_focus() {
+                                current_wheel.state.pct_bufs[item_index] = format!("{:.0}", item_pct.round());
                             }
                         });
                     });
                 }
 
-                if let Some(idx) = apply_pct {
-                    if w.apply_pct_input(idx) {
-                        for b in w.state.pct_bufs.iter_mut() { b.clear(); }
-                        changed = true;
+                if let Some(item_index) = apply_pct_for_index {
+                    let did_apply = current_wheel.apply_pct_input(item_index);
+                    if did_apply {
+                        for buf in current_wheel.state.pct_bufs.iter_mut() {
+                            buf.clear();
+                        }
+                        something_changed = true;
                     }
                 }
 
-                if commit_edit {
-                    if let Some(idx) = w.state.editing_idx {
-                        let trimmed = w.state.edit_buf.trim().to_string();
-                        if !trimmed.is_empty() {
-                            w.data.items[idx].name = trimmed;
-                            changed = true;
+                if should_commit_edit {
+                    if let Some(editing_index) = current_wheel.state.editing_idx {
+                        let new_name = current_wheel.state.edit_buf.trim().to_string();
+                        if !new_name.is_empty() {
+                            current_wheel.data.items[editing_index].name = new_name;
+                            something_changed = true;
                         }
                     }
-                    w.state.editing_idx = None;
-                    w.state.edit_buf.clear();
+                    current_wheel.state.editing_idx = None;
+                    current_wheel.state.edit_buf.clear();
                 }
 
-                if let Some(i) = remove_perm {
-                    if w.state.editing_idx == Some(i) { w.state.editing_idx = None; }
-                    w.data.items.remove(i);
-                    w.state.pct_bufs.remove(i);
-                    w.state.pct_bufs.iter_mut().for_each(|b| b.clear());
-                    changed = true;
+                if let Some(item_index) = remove_perm {
+                    if current_wheel.state.editing_idx == Some(item_index) {
+                        current_wheel.state.editing_idx = None;
+                    }
+                    current_wheel.data.items.remove(item_index);
+                    current_wheel.state.pct_bufs.remove(item_index);
+                    for buf in current_wheel.state.pct_bufs.iter_mut() {
+                        buf.clear();
+                    }
+                    something_changed = true;
                 }
-                if let Some(i) = remove_temp {
-                    if w.state.editing_idx == Some(i) { w.state.editing_idx = None; }
-                    let item = w.data.items.remove(i);
-                    w.state.pct_bufs.remove(i);
-                    w.state.pct_bufs.iter_mut().for_each(|b| b.clear());
-                    w.data.removed_items.push(item);
-                    changed = true;
+                if let Some(item_index) = remove_temp {
+                    if current_wheel.state.editing_idx == Some(item_index) {
+                        current_wheel.state.editing_idx = None;
+                    }
+                    let moved_item = current_wheel.data.items.remove(item_index);
+                    current_wheel.state.pct_bufs.remove(item_index);
+                    for buf in current_wheel.state.pct_bufs.iter_mut() {
+                        buf.clear();
+                    }
+                    current_wheel.data.removed_items.push(moved_item);
+                    something_changed = true;
                 }
             });
 
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                let can_spin = !w.state.is_spinning && w.data.items.len() >= 2;
+                let wheel_has_enough_items = current_wheel.data.items.len() >= 2;
+                let can_spin = !current_wheel.state.is_spinning && wheel_has_enough_items;
                 if ui.add_enabled(can_spin, egui::Button::new("🎲 SPIN!")).clicked() {
-                    w.spin();
+                    current_wheel.spin();
                 }
                 if ui.button("Clear All").clicked() {
-                    w.data.items.clear();
-                    w.data.winner_history.clear();
-                    w.state.pct_bufs.clear();
-                    w.state.editing_idx = None;
-                    changed = true;
+                    current_wheel.data.items.clear();
+                    current_wheel.data.winner_history.clear();
+                    current_wheel.state.pct_bufs.clear();
+                    current_wheel.state.editing_idx = None;
+                    something_changed = true;
                 }
             });
 
             ui.add_space(5.0);
-            if ui.checkbox(&mut w.data.remove_winner, "Remove winner after spin").changed() {
-                changed = true;
+            if ui.checkbox(&mut current_wheel.data.remove_winner, "Remove winner after spin").changed() {
+                something_changed = true;
             }
-            if ui.checkbox(&mut w.data.auto_spin, "Keep spinning until one left").changed() {
-                changed = true;
+            if ui.checkbox(&mut current_wheel.data.auto_spin, "Keep spinning until one left").changed() {
+                something_changed = true;
             }
 
             ui.add_space(5.0);
 
-            if !w.data.removed_items.is_empty() {
+            if !current_wheel.data.removed_items.is_empty() {
                 ui.separator();
                 ui.add_space(5.0);
                 ui.horizontal(|ui| {
-                    ui.heading(format!("Removed ({})", w.data.removed_items.len()));
-                    let arrow = if self.show_removed { "▼" } else { "▶" };
-                    if ui.small_button(arrow).clicked() {
+                    ui.heading(format!("Removed ({})", current_wheel.data.removed_items.len()));
+                    let arrow_symbol = if self.show_removed { "▼" } else { "▶" };
+                    if ui.small_button(arrow_symbol).clicked() {
                         self.show_removed = !self.show_removed;
                     }
                 });
                 if self.show_removed {
                     egui::ScrollArea::vertical().max_height(100.0).show(ui, |ui| {
-                        for item in &w.data.removed_items {
-                            ui.label(&item.name);
+                        for removed_item in &current_wheel.data.removed_items {
+                            ui.label(&removed_item.name);
                         }
                     });
                 }
                 if ui.button("Restore All").clicked() {
-                    let count = w.data.removed_items.len();
-                    w.data.items.append(&mut w.data.removed_items);
-                    for _ in 0..count { w.state.pct_bufs.push(String::new()); }
-                    w.state.pct_bufs.iter_mut().for_each(|b| b.clear());
-                    changed = true;
+                    let how_many_removed = current_wheel.data.removed_items.len();
+                    current_wheel.data.items.append(&mut current_wheel.data.removed_items);
+                    for _ in 0..how_many_removed {
+                        current_wheel.state.pct_bufs.push(String::new());
+                    }
+                    for buf in current_wheel.state.pct_bufs.iter_mut() {
+                        buf.clear();
+                    }
+                    something_changed = true;
                 }
             }
 
@@ -495,47 +556,49 @@ impl eframe::App for WheelApp {
 
             ui.horizontal(|ui| {
                 ui.heading("Winner History");
-                let arrow = if self.show_history { "▼" } else { "▶" };
-                if ui.small_button(arrow).clicked() {
+                let arrow_symbol = if self.show_history { "▼" } else { "▶" };
+                if ui.small_button(arrow_symbol).clicked() {
                     self.show_history = !self.show_history;
                 }
             });
 
-            if self.show_history && !w.data.winner_history.is_empty() {
+            let history_is_visible = self.show_history && !current_wheel.data.winner_history.is_empty();
+            if history_is_visible {
                 egui::ScrollArea::vertical().max_height(150.0).show(ui, |ui| {
-                    for (i, winner) in w.data.winner_history.iter().enumerate() {
+                    for (history_index, winner_name) in current_wheel.data.winner_history.iter().enumerate() {
                         ui.horizontal(|ui| {
-                            ui.label(format!("{}.", i + 1));
-                            let color = if i == 0 {
+                            ui.label(format!("{}.", history_index + 1));
+                            let text_color = if history_index == 0 {
                                 egui::Color32::from_rgb(255, 215, 0)
                             } else {
                                 egui::Color32::LIGHT_GRAY
                             };
-                            ui.label(egui::RichText::new(winner).color(color));
+                            ui.label(egui::RichText::new(winner_name).color(text_color));
                         });
                     }
                 });
                 if ui.button("Clear History").clicked() {
-                    w.data.winner_history.clear();
-                    changed = true;
+                    current_wheel.data.winner_history.clear();
+                    something_changed = true;
                 }
             }
         });
 
-        if changed || self.needs_save {
+        if something_changed || self.needs_save {
             self.save_data();
             self.needs_save = false;
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            let w = &self.wheels[self.current];
+            let current_wheel = &self.wheels[self.current];
 
-            if !w.data.winner_history.is_empty() {
+            if !current_wheel.data.winner_history.is_empty() {
                 ui.add_space(10.0);
                 ui.vertical_centered(|ui| {
                     ui.heading("🎉 Latest Winner:");
+                    let latest_winner_name = &current_wheel.data.winner_history[0];
                     ui.label(
-                        egui::RichText::new(&w.data.winner_history[0])
+                        egui::RichText::new(latest_winner_name)
                             .size(36.0)
                             .color(egui::Color32::from_rgb(255, 215, 0)),
                     );
@@ -546,81 +609,86 @@ impl eframe::App for WheelApp {
             ui.separator();
             ui.add_space(20.0);
             // wheel graphics below, i'm not using a png
-            if !w.data.items.is_empty() {
-                let avail = ui.available_size();
-                let size = (avail.y.min(avail.x) * 0.85).max(200.0);
-                let total_weight = w.total_weight() as f32;
+            if !current_wheel.data.items.is_empty() {
+                let available_space = ui.available_size();
+                let wheel_size = (available_space.y.min(available_space.x) * 0.85).max(200.0);
+                let total_weight = current_wheel.total_weight() as f32;
 
                 ui.vertical_centered(|ui| {
-                    let (_id, rect) = ui.allocate_space(egui::vec2(size, size));
+                    let (_id, wheel_rect) = ui.allocate_space(egui::vec2(wheel_size, wheel_size));
 
-                    if ui.is_rect_visible(rect) {
+                    if ui.is_rect_visible(wheel_rect) {
                         let painter = ui.painter();
-                        let center = rect.center();
-                        let radius = size / 2.0 - 10.0;
+                        let wheel_center = wheel_rect.center();
+                        let wheel_radius = wheel_size / 2.0 - 10.0;
 
-                        if w.data.items.len() == 1 {
-                            painter.circle_filled(center, radius, egui::Color32::from_rgb(100, 150, 200));
-                            painter.circle_stroke(center, radius, egui::Stroke::new(2.0, egui::Color32::WHITE));
-                            let txt_size = (size / 25.0).max(12.0).min(18.0);
+                        if current_wheel.data.items.len() == 1 {
+                            painter.circle_filled(wheel_center, wheel_radius, egui::Color32::from_rgb(100, 150, 200));
+                            painter.circle_stroke(wheel_center, wheel_radius, egui::Stroke::new(2.0, egui::Color32::WHITE));
+                            let font_size = (wheel_size / 25.0).max(12.0).min(18.0);
                             painter.text(
-                                egui::pos2(center.x, center.y - radius * 0.3),
+                                egui::pos2(wheel_center.x, wheel_center.y - wheel_radius * 0.3),
                                 egui::Align2::CENTER_CENTER,
-                                &w.data.items[0].name,
-                                egui::FontId::proportional(txt_size),
+                                &current_wheel.data.items[0].name,
+                                egui::FontId::proportional(font_size),
                                 egui::Color32::WHITE,
                             );
                         } else {
-                            let mut angle_offset = -w.state.rotation;
-                            for (i, item) in w.data.items.iter().enumerate() {
-                                let slice = 2.0 * PI * (item.weight as f32 / total_weight);
-                                let start = angle_offset;
-                                let end = angle_offset + slice;
+                            let mut current_angle = -current_wheel.state.rotation;
+                            for (item_index, item) in current_wheel.data.items.iter().enumerate() {
+                                let slice_angle = 2.0 * PI * (item.weight as f32 / total_weight);
+                                let slice_start_angle = current_angle;
+                                let slice_end_angle = current_angle + slice_angle;
 
-                                let hue = i as f32 / w.data.items.len() as f32;
-                                let r = (255.0 * (hue * 6.0).sin().abs()) as u8;
-                                let g = (255.0 * ((hue * 6.0) + 2.0).sin().abs()) as u8;
-                                let b = (255.0 * ((hue * 6.0) + 4.0).sin().abs()) as u8;
+                                let hue = item_index as f32 / current_wheel.data.items.len() as f32;
+                                let red_amount = (255.0 * (hue * 6.0).sin().abs()) as u8;
+                                let green_amount = (255.0 * ((hue * 6.0) + 2.0).sin().abs()) as u8;
+                                let blue_amount = (255.0 * ((hue * 6.0) + 4.0).sin().abs()) as u8;
+                                let slice_color = egui::Color32::from_rgb(red_amount, green_amount, blue_amount);
 
-                                let mut pts = vec![center];
-                                for s in 0..=30 {
-                                    let a = start + (end - start) * s as f32 / 30.0;
-                                    pts.push(egui::pos2(
-                                        center.x + radius * a.cos(),
-                                        center.y + radius * a.sin(),
-                                    ));
+                                let mut slice_points = vec![wheel_center];
+                                for step in 0..=30 {
+                                    let angle_at_step = slice_start_angle + (slice_end_angle - slice_start_angle) * step as f32 / 30.0;
+                                    let point_x = wheel_center.x + wheel_radius * angle_at_step.cos();
+                                    let point_y = wheel_center.y + wheel_radius * angle_at_step.sin();
+                                    slice_points.push(egui::pos2(point_x, point_y));
                                 }
 
                                 painter.add(egui::Shape::convex_polygon(
-                                    pts,
-                                    egui::Color32::from_rgb(r, g, b),
+                                    slice_points,
+                                    slice_color,
                                     egui::Stroke::new(2.0, egui::Color32::WHITE),
                                 ));
 
-                                let mid = (start + end) / 2.0;
-                                let txt_r = radius * 0.7;
-                                let txt_size = (size / 25.0).max(12.0).min(18.0);
+                                let label_angle = (slice_start_angle + slice_end_angle) / 2.0;
+                                let label_radius = wheel_radius * 0.7;
+                                let label_x = wheel_center.x + label_radius * label_angle.cos();
+                                let label_y = wheel_center.y + label_radius * label_angle.sin();
+                                let font_size = (wheel_size / 25.0).max(12.0).min(18.0);
                                 painter.text(
-                                    egui::pos2(center.x + txt_r * mid.cos(), center.y + txt_r * mid.sin()),
+                                    egui::pos2(label_x, label_y),
                                     egui::Align2::CENTER_CENTER,
                                     &item.name,
-                                    egui::FontId::proportional(txt_size),
+                                    egui::FontId::proportional(font_size),
                                     egui::Color32::WHITE,
                                 );
 
-                                angle_offset = end;
+                                current_angle = slice_end_angle;
                             }
                         }
 
-                        let dot = (size / 20.0).max(10.0);
-                        painter.circle_filled(center, dot, egui::Color32::from_rgb(50, 50, 50));
+                        let center_dot_size = (wheel_size / 20.0).max(10.0);
+                        painter.circle_filled(wheel_center, center_dot_size, egui::Color32::from_rgb(50, 50, 50));
 
-                        let arrow = size / 50.0;
+                        let arrow_size = wheel_size / 50.0;
+                        let arrow_tip_y = wheel_rect.top() + arrow_size * 2.5;
+                        let arrow_left_x = wheel_center.x - arrow_size;
+                        let arrow_right_x = wheel_center.x + arrow_size;
                         painter.add(egui::Shape::convex_polygon(
                             vec![
-                                egui::pos2(center.x, rect.top() + arrow * 2.5),
-                                egui::pos2(center.x - arrow, rect.top() + 5.0),
-                                egui::pos2(center.x + arrow, rect.top() + 5.0),
+                                egui::pos2(wheel_center.x, arrow_tip_y),
+                                egui::pos2(arrow_left_x, wheel_rect.top() + 5.0),
+                                egui::pos2(arrow_right_x, wheel_rect.top() + 5.0),
                             ],
                             egui::Color32::RED,
                             egui::Stroke::new(2.0, egui::Color32::DARK_RED),
